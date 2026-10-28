@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Steuer-Belege</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A7%BE%3C/text%3E%3C/svg%3E">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Steuer">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1b1f27" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1 class="brand">🧾 Steuer-Belege</h1>
+    <div class="year-control">
+      <label for="year-select">Jahr</label>
+      <select id="year-select" class="input"></select>
+      <button type="button" id="add-year" class="icon-btn" title="Jahr hinzufügen">+</button>
+    </div>
+    <div class="top-actions">
+      <button type="button" id="export-csv" class="btn btn-ghost" title="Alle Positionen des gewählten Jahres als CSV (Excel) exportieren">CSV-Export</button>
+      <button type="button" id="export-backup" class="btn btn-ghost" title="Alle Daten inkl. Belege als Datei sichern">Backup speichern</button>
+      <button type="button" id="import-backup" class="btn btn-ghost" title="Backup-Datei laden (ersetzt die aktuellen Daten)">Backup laden</button>
+      <input type="file" id="import-file" accept="application/json,.json" hidden>
+    </div>
+  </header>
+  <div id="claude-notice" class="notice" hidden>
+    Du nutzt die Version in Claude. Die Daten liegen nur in der Claude-App auf diesem Gerät und
+    werden nicht zwischen Geräten abgeglichen. Bitte regelmäßig „Backup speichern“ nutzen.
+  </div>
+
+  <div class="layout">
+    <nav id="sidebar" class="sidebar" aria-label="Personen und Unternehmen"></nav>
+    <main id="main" class="main"></main>
+  </div>
+
+  <footer class="footer">
+    Alle Daten werden nur lokal in diesem Browser gespeichert. Bitte regelmäßig „Backup speichern“ nutzen.
+  </footer>
+
+  <datalist id="category-list"></datalist>
+
+  <script src="js/logic.js"></script>
+  <script src="js/db.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
