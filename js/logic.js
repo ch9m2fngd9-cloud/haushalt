@@ -157,6 +157,75 @@
     return result;
   }
 
+  /** Indizes der Monate mit eingetragenem Betrag. */
+  function filledMonths(position) {
+    return position.months.map((m, i) => (m === null ? -1 : i)).filter((i) => i >= 0);
+  }
+
+  /**
+   * Datum zum Sortieren (JJJJ-MM-TT): einmalig = Zahlungsdatum,
+   * monatlich = 1. des ersten Monats mit Betrag. Ohne Datum: ''.
+   */
+  function positionDate(position) {
+    if (position.kind === 'once') return position.onceDate || '';
+    const filled = filledMonths(position);
+    return filled.length ? position.year + '-' + String(filled[0] + 1).padStart(2, '0') + '-01' : '';
+  }
+
+  /** Nach Datum aufsteigend; Positionen ohne Datum ans Ende, sonst nach Bezeichnung. */
+  function sortByDate(positions) {
+    return positions.slice().sort((a, b) => {
+      const da = positionDate(a);
+      const db = positionDate(b);
+      if (da !== db) {
+        if (!da) return 1;
+        if (!db) return -1;
+        return da < db ? -1 : 1;
+      }
+      return (a.title || '').localeCompare(b.title || '', 'de', { numeric: true });
+    });
+  }
+
+  /** Monat (0–11) einer einmaligen Zahlung, sonst -1. */
+  function onceMonth(position) {
+    return position.onceDate ? Number(position.onceDate.slice(5, 7)) - 1 : -1;
+  }
+
+  /** Betrag einer Position in einem Monat (0–11), in Cent. */
+  function amountInMonth(position, month) {
+    if (position.kind === 'once') return onceMonth(position) === month ? position.onceAmount || 0 : 0;
+    return position.months[month] || 0;
+  }
+
+  /** Summen nach Ausgaben/Einnahmen, optional nur für einen Monat. */
+  function totalsFor(positions, month) {
+    if (month === null || month === undefined) return totals(positions);
+    const result = { expense: 0, income: 0 };
+    for (const p of positions) result[p.direction === 'income' ? 'income' : 'expense'] += amountInMonth(p, month);
+    return result;
+  }
+
+  /**
+   * Filter: { direction: 'all'|'expense'|'income', month: null|0–11, category: '', query: '' }.
+   * Beim Monat zählt eine monatliche Position, wenn für den Monat ein Betrag eingetragen ist,
+   * eine einmalige, wenn ihr Datum in den Monat fällt.
+   */
+  function filterPositions(positions, filter) {
+    const f = filter || {};
+    const query = (f.query || '').trim().toLowerCase();
+    return positions.filter((p) => {
+      if (f.direction && f.direction !== 'all' && p.direction !== f.direction) return false;
+      if (f.category && p.category !== f.category) return false;
+      if (f.month !== null && f.month !== undefined) {
+        if (p.kind === 'once' ? onceMonth(p) !== f.month : p.months[f.month] === null) return false;
+      }
+      if (query && ![p.title, p.category, p.reference, p.note].some((v) => (v || '').toLowerCase().includes(query))) {
+        return false;
+      }
+      return true;
+    });
+  }
+
   /** Gruppiert Positionen nach Kategorie, Kategorien alphabetisch sortiert. */
   function groupByCategory(positions) {
     const map = new Map();
@@ -288,6 +357,12 @@
     positionTotal,
     totals,
     groupByCategory,
+    filledMonths,
+    positionDate,
+    sortByDate,
+    amountInMonth,
+    totalsFor,
+    filterPositions,
     copyPositionsToYear,
     describeImport,
     planMerge,

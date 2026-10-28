@@ -19,7 +19,6 @@
   };
 
   let objectUrls = [];
-  const saveTimers = new Map();
 
   // ---------------------------------------------------------------------------
   // DOM-Hilfen
@@ -54,27 +53,10 @@
     return h('button', Object.assign({ type: 'button', class: 'btn' + (variant ? ' btn-' + variant : ''), onclick }, attrs || {}), label);
   }
 
-  function segmented(options, current, onChange, label) {
-    return h('div', { class: 'segmented', role: 'group', 'aria-label': label },
-      options.map(([value, text]) => h('button', {
-        type: 'button',
-        class: value === current ? 'active' : '',
-        'aria-pressed': value === current ? 'true' : 'false',
-        onclick: () => { if (value !== current) onChange(value); },
-      }, text)));
-  }
-
   function formatSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' KB';
     return (bytes / 1024 / 1024).toFixed(1).replace('.', ',') + ' MB';
-  }
-
-  function totalsText(t) {
-    const parts = [];
-    if (t.expense || !t.income) parts.push(L.formatEuro(t.expense));
-    if (t.income) parts.push('Einnahmen ' + L.formatEuro(t.income));
-    return parts.join(' · ');
   }
 
   // Läuft die App als Artifact in Claude, sind normale Downloads gesperrt;
@@ -158,6 +140,7 @@
     state.years = Array.from(yearSet).sort((a, b) => a - b);
     state.year = lastYear && yearSet.has(lastYear) ? lastYear : new Date().getFullYear();
     if (state.view.type === 'entity' && !entityById(state.view.id)) state.view = { type: 'overview' };
+    resetUi();
   }
 
   function entityById(id) {
@@ -171,14 +154,7 @@
   }
 
   function savePosition(p) {
-    clearTimeout(saveTimers.get(p.id));
-    saveTimers.delete(p.id);
     return DB.put('positions', p);
-  }
-
-  function queueSave(p) {
-    clearTimeout(saveTimers.get(p.id));
-    saveTimers.set(p.id, setTimeout(() => savePosition(p), 250));
   }
 
   async function ensureCategory(name) {
@@ -191,6 +167,11 @@
   }
 
   async function setYear(year) {
+    if (!(await confirmLeave())) {
+      document.getElementById('year-select').value = String(state.year);
+      return;
+    }
+    resetUi();
     state.year = year;
     if (!state.years.includes(year)) {
       state.years.push(year);
@@ -236,6 +217,7 @@
   }
 
   async function addEntity(type, ownerId) {
+    if (!(await confirmLeave())) return;
     const label = type === 'company' ? 'Unternehmen' : 'Person';
     const preset = ownerId === undefined ? currentPersonId() : ownerId;
     const result = await entityDialog(label + ' hinzufügen', type, '', preset);
@@ -243,6 +225,7 @@
     const entity = L.createEntity(type, result.name, result.ownerId);
     await DB.put('entities', entity);
     state.entities.push(entity);
+    resetUi();
     state.view = { type: 'entity', id: entity.id };
     render();
   }
@@ -272,31 +255,8 @@
     await DB.remove('entities', entity.id);
     state.positions = state.positions.filter((p) => p.entityId !== entity.id);
     state.entities = state.entities.filter((e) => e.id !== entity.id);
+    resetUi();
     state.view = { type: 'overview' };
-    render();
-  }
-
-  async function addPosition(entity) {
-    const p = L.createPosition({ year: state.year, entityId: entity.id, category: 'Sonstiges' });
-    await savePosition(p);
-    state.positions.push(p);
-    render();
-    const card = document.querySelector('[data-id="' + p.id + '"]');
-    if (card) {
-      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      card.querySelector('.title-input').focus();
-    }
-  }
-
-  async function deletePosition(p) {
-    const ok = await confirmDialog('Position löschen?',
-      '„' + (p.title || 'Ohne Bezeichnung') + '“ wird samt ' + p.attachmentIds.length + ' Beleg(en) gelöscht.',
-      'Löschen', true);
-    if (!ok) return;
-    clearTimeout(saveTimers.get(p.id));
-    await DB.removeMany('attachments', p.attachmentIds);
-    await DB.remove('positions', p.id);
-    state.positions = state.positions.filter((x) => x.id !== p.id);
     render();
   }
 
@@ -331,46 +291,6 @@
     render();
   }
 
-  async function addFiles(p, files, list) {
-    const accepted = [];
-    const rejected = [];
-    for (const file of files) {
-      if (file.type.startsWith('image/') || file.type === 'application/pdf') accepted.push(file);
-      else rejected.push(file.name);
-    }
-    for (const file of accepted) {
-      const att = {
-        id: L.uid(),
-        positionId: p.id,
-        name: file.name,
-        type: file.type,
-        size: file.size,
-        blob: file,
-        addedAt: new Date().toISOString(),
-      };
-      await DB.put('attachments', att);
-      p.attachmentIds.push(att.id);
-    }
-    if (accepted.length) {
-      await savePosition(p);
-      renderAttachments(p, list);
-      updateTotals();
-    }
-    if (rejected.length) {
-      await alertDialog('Nicht unterstützt', 'Nur Bilder und PDFs können angehängt werden: ' + rejected.join(', '));
-    }
-  }
-
-  async function removeAttachment(p, att, list) {
-    const ok = await confirmDialog('Beleg entfernen?', '„' + att.name + '“ wird gelöscht.', 'Entfernen', true);
-    if (!ok) return;
-    await DB.remove('attachments', att.id);
-    p.attachmentIds = p.attachmentIds.filter((id) => id !== att.id);
-    await savePosition(p);
-    renderAttachments(p, list);
-    updateTotals();
-  }
-
   // ---------------------------------------------------------------------------
   // Backup & Export
 
@@ -391,7 +311,6 @@
   }
 
   async function exportBackup() {
-    for (const p of state.positions) if (saveTimers.has(p.id)) await savePosition(p);
     const attachments = await DB.getAll('attachments');
     const data = {
       app: 'steuer-belege',
@@ -481,7 +400,6 @@
   }
 
   async function mergeImport(data, selectedEntityIds) {
-    for (const p of state.positions) if (saveTimers.has(p.id)) await savePosition(p);
     const plan = L.planMerge(state, data, selectedEntityIds);
     const wanted = new Set(plan.addedAttachmentIds);
     const attachments = (data.attachments || [])
@@ -621,7 +539,6 @@
     document.body.append(busy);
     let bytes;
     try {
-      for (const p of state.positions) if (saveTimers.has(p.id)) await savePosition(p);
       const PDFLib = await loadPdfLib();
       bytes = await window.PdfReport.build({
         PDFLib,
@@ -671,7 +588,7 @@
     const item = (e, sub) => h('button', {
       type: 'button',
       class: 'nav-item' + (sub ? ' nav-sub' : '') + (isActive(e.id) ? ' active' : ''),
-      onclick: () => { state.view = { type: 'entity', id: e.id }; render(); },
+      onclick: () => go({ type: 'entity', id: e.id }),
     }, h('span', { class: 'nav-name' }, e.name), h('span', { class: 'nav-sum', dataset: { entitySum: e.id } }));
     const head = (title, type) => h('div', { class: 'nav-group-head' },
       h('h2', null, title),
@@ -692,7 +609,7 @@
       h('button', {
         type: 'button',
         class: 'nav-item nav-overview' + (state.view.type === 'overview' ? ' active' : ''),
-        onclick: () => { state.view = { type: 'overview' }; render(); },
+        onclick: () => go({ type: 'overview' }),
       }, 'Jahresübersicht ' + state.year),
       group('person', 'Personen'),
       group('company', 'Unternehmen'));
@@ -714,6 +631,187 @@
     main.replaceChildren(entity ? entityView(entity) : overviewView());
   }
 
+  // ---------------------------------------------------------------------------
+  // Positionen: kompakte Liste nach Datum, Details per Antippen, Änderungen nur über
+  // „Übernehmen“/„Speichern“. Während der Eingabe wird nichts neu aufgebaut oder sortiert.
+
+  function emptyFilters() {
+    return { direction: 'all', month: null, category: '', query: '' };
+  }
+
+  const ui = {
+    openId: null, // aufgeklappte Position
+    draft: null, // { isNew, p, pending, removed, invalid } beim Anlegen/Bearbeiten
+    dirty: false,
+    filters: emptyFilters(),
+  };
+
+  function resetUi() {
+    ui.openId = null;
+    ui.draft = null;
+    ui.dirty = false;
+    ui.filters = emptyFilters();
+  }
+
+  /** Vor dem Verlassen eines nicht übernommenen Entwurfs nachfragen. */
+  async function confirmLeave() {
+    if (!ui.draft || !ui.dirty) return true;
+    return confirmDialog('Änderungen verwerfen?',
+      'Die Position wurde noch nicht übernommen. Deine Eingaben gehen sonst verloren.', 'Verwerfen', true);
+  }
+
+  async function go(view) {
+    if (!(await confirmLeave())) return false;
+    resetUi();
+    state.view = view;
+    render();
+    window.scrollTo(0, 0);
+    return true;
+  }
+
+  function scrollToPosition(id, highlight) {
+    const item = document.querySelector('.pos-item[data-id="' + id + '"]');
+    if (!item) return;
+    item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (highlight) {
+      item.classList.remove('saved');
+      void item.offsetWidth;
+      item.classList.add('saved');
+    }
+  }
+
+  function makeDraft(p, isNew) {
+    return {
+      isNew,
+      p: Object.assign({}, p, { months: p.months.slice(), attachmentIds: p.attachmentIds.slice() }),
+      pending: [],
+      removed: [],
+      invalid: new Set(),
+    };
+  }
+
+  async function startNew(entity) {
+    if (!(await confirmLeave())) return;
+    ui.openId = null;
+    ui.draft = makeDraft(L.createPosition({ year: state.year, entityId: entity.id, category: '' }), true);
+    ui.dirty = false;
+    renderMain();
+    const title = document.querySelector('.editor .editor-title');
+    if (title) {
+      title.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      title.focus();
+    }
+  }
+
+  async function toggleRow(p) {
+    if (ui.draft && !(await confirmLeave())) return;
+    ui.draft = null;
+    ui.dirty = false;
+    ui.openId = ui.openId === p.id ? null : p.id;
+    renderPositionList();
+    if (ui.openId) scrollToPosition(p.id);
+  }
+
+  async function startEdit(p) {
+    if (ui.draft && !(await confirmLeave())) return;
+    ui.openId = p.id;
+    ui.draft = makeDraft(p, false);
+    ui.dirty = false;
+    renderMain();
+    scrollToPosition(p.id);
+  }
+
+  async function cancelEdit() {
+    if (!(await confirmLeave())) return;
+    const wasNew = ui.draft && ui.draft.isNew;
+    ui.draft = null;
+    ui.dirty = false;
+    renderMain();
+    if (!wasNew && ui.openId) scrollToPosition(ui.openId);
+  }
+
+  async function saveDraft() {
+    const d = ui.draft;
+    const p = d.p;
+    if (d.invalid.size) {
+      await alertDialog('Betrag prüfen', 'Mindestens ein Betrag ist ungültig (rot markiert). Erlaubt sind z.B. 89, 89,50 oder 1.234,56.');
+      return;
+    }
+    p.title = p.title.trim();
+    if (!p.title) {
+      await alertDialog('Bezeichnung fehlt', 'Bitte gib der Position eine Bezeichnung, z.B. „Kfz-Versicherung“.');
+      const title = document.querySelector('.editor .editor-title');
+      if (title) title.focus();
+      return;
+    }
+    p.category = (p.category || '').trim() || 'Sonstiges';
+    p.reference = (p.reference || '').trim();
+
+    for (const file of d.pending) {
+      await DB.put('attachments', {
+        id: file.id, positionId: p.id, name: file.name, type: file.type, size: file.size,
+        blob: file.blob, addedAt: new Date().toISOString(),
+      });
+      p.attachmentIds.push(file.id);
+    }
+    if (d.removed.length) {
+      await DB.removeMany('attachments', d.removed);
+      p.attachmentIds = p.attachmentIds.filter((id) => !d.removed.includes(id));
+    }
+    await savePosition(p);
+    const index = state.positions.findIndex((x) => x.id === p.id);
+    if (index >= 0) state.positions[index] = p;
+    else state.positions.push(p);
+    await ensureCategory(p.category);
+
+    ui.draft = null;
+    ui.dirty = false;
+    ui.openId = null;
+    renderSidebar();
+    renderMain();
+    scrollToPosition(p.id, true);
+  }
+
+  async function deletePosition(p) {
+    const ok = await confirmDialog('Position löschen?',
+      '„' + (p.title || 'Ohne Bezeichnung') + '“ wird samt ' + p.attachmentIds.length + ' Beleg(en) gelöscht.',
+      'Löschen', true);
+    if (!ok) return;
+    await DB.removeMany('attachments', p.attachmentIds);
+    await DB.remove('positions', p.id);
+    state.positions = state.positions.filter((x) => x.id !== p.id);
+    ui.draft = null;
+    ui.dirty = false;
+    ui.openId = null;
+    render();
+  }
+
+  /** Dateityp bestimmen; manche Apps liefern keinen Typ mit, dann zählt die Endung. */
+  function fileType(file) {
+    if (file.type === 'application/pdf' || file.type.startsWith('image/')) return file.type;
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const byExt = { pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+      heic: 'image/heic', heif: 'image/heif', webp: 'image/webp', gif: 'image/gif' };
+    return byExt[ext] || null;
+  }
+
+  async function addFilesToDraft(d, files, refresh) {
+    const rejected = [];
+    for (const file of files) {
+      const type = fileType(file);
+      if (!type) { rejected.push(file.name); continue; }
+      d.pending.push({ id: L.uid(), name: file.name, type, size: file.size, blob: file });
+    }
+    ui.dirty = true;
+    refresh();
+    if (rejected.length) {
+      await alertDialog('Nicht unterstützt', 'Nur Bilder und PDFs können angehängt werden: ' + rejected.join(', '));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Ansicht einer Person / eines Unternehmens
+
   function stat(label, value, key, tone) {
     return h('div', { class: 'stat' + (tone ? ' stat-' + tone : '') },
       h('span', { class: 'stat-label' }, label),
@@ -727,9 +825,9 @@
   function entityView(entity) {
     const positions = positionsFor(entity.id, state.year);
     const t = L.totals(positions);
-    const groups = L.groupByCategory(positions);
     const owner = L.ownerOf(entity, state.entities);
-    const open = (id) => { state.view = { type: 'entity', id }; render(); window.scrollTo(0, 0); };
+    const open = (id) => go({ type: 'entity', id });
+    const newDraft = ui.draft && ui.draft.isNew ? ui.draft : null;
     return h('div', { class: 'view' },
       h('div', { class: 'view-head' },
         h('div', null,
@@ -741,66 +839,153 @@
           button('Bearbeiten', () => editEntity(entity), 'ghost'),
           button('Löschen', () => deleteEntity(entity), 'ghost-danger'))),
       h('div', { class: 'stats' },
-        stat('Ausgaben', L.formatEuro(t.expense), 'expense'),
-        stat('Einnahmen', L.formatEuro(t.income), 'income', 'income'),
+        stat('Ausgaben', L.formatEuro(t.expense)),
+        stat('Einnahmen', L.formatEuro(t.income), null, 'income'),
         stat('Positionen', String(positions.length)),
-        stat('Belege', String(attachmentCount(positions)), 'attachments')),
+        stat('Belege', String(attachmentCount(positions)))),
       entity.type === 'person' ? ownedCompanies(entity, open) : null,
-      h('div', { class: 'toolbar' },
-        button('+ Position hinzufügen', () => addPosition(entity), 'primary'),
-        button('Aus Vorjahr übernehmen', () => copyFromPreviousYear(entity))),
+      newDraft
+        ? h('section', { class: 'card editor-card' }, h('h3', null, 'Neue Position'), positionEditor(newDraft))
+        : h('div', { class: 'toolbar' },
+          button('+ Neue Position', () => startNew(entity), 'primary'),
+          button('Aus Vorjahr übernehmen', () => copyFromPreviousYear(entity))),
       positions.length
-        ? groups.map((g) => h('section', { class: 'category' },
-          h('div', { class: 'category-head' },
-            h('h3', null, g.category),
-            h('span', { class: 'category-sum', dataset: { catTotal: g.category } }, totalsText(L.totals(g.items)))),
-          g.items.map(positionCard)))
-        : h('div', { class: 'empty' },
+        ? h('section', { class: 'card list-card' },
+          filterBar(positions),
+          h('div', { id: 'pos-list' }, positionListContent(positions)))
+        : newDraft ? null : h('div', { class: 'empty' },
           h('p', null, 'Für ' + state.year + ' gibt es noch keine Positionen.'),
           h('p', { class: 'muted' }, 'Lege z.B. ein Bankkonto, eine Kfz-Versicherung oder die Kfz-Steuer an.')));
   }
 
-  /** Liste der Unternehmen einer Person mit ihren Jahressummen. */
-  function ownedCompanies(person, open) {
-    const companies = state.entities.filter((e) => e.type === 'company' && e.ownerId === person.id);
-    return h('section', { class: 'card owned' },
-      h('div', { class: 'owned-head' },
-        h('h3', null, 'Unternehmen von ' + person.name),
-        button('+ Unternehmen', () => addEntity('company', person.id), 'small')),
-      companies.length
-        ? h('div', { class: 'owned-list' }, companies.map((c) => {
-          const ps = positionsFor(c.id, state.year);
-          const t = L.totals(ps);
-          return h('button', { type: 'button', class: 'owned-item', onclick: () => open(c.id) },
-            h('span', { class: 'owned-name' }, c.name),
-            h('span', { class: 'muted' }, ps.length + ' Position(en)'),
-            h('span', { class: 'owned-sum' }, L.formatEuro(t.expense),
-              t.income ? h('span', { class: 'income-text' }, ' · +' + L.formatEuro(t.income)) : null),
-            h('span', { class: 'owned-arrow', 'aria-hidden': 'true' }, '›'));
-        }))
-        : h('p', { class: 'muted' }, 'Noch keine Unternehmen zugeordnet. Bestehende Unternehmen ordnest du über „Bearbeiten“ beim Unternehmen zu.'));
-  }
-
-  function updateTotals() {
-    updateSidebarSums();
+  /** Nur die Liste neu zeichnen (z.B. bei Filteränderung), damit z.B. das Suchfeld den Fokus behält. */
+  function renderPositionList() {
+    const host = document.getElementById('pos-list');
     const entity = state.view.type === 'entity' ? entityById(state.view.id) : null;
-    if (!entity) return;
-    const positions = positionsFor(entity.id, state.year);
-    const t = L.totals(positions);
-    const set = (sel, text) => { const el = document.querySelector(sel); if (el) el.textContent = text; };
-    set('[data-sum="expense"]', L.formatEuro(t.expense));
-    set('[data-sum="income"]', L.formatEuro(t.income));
-    set('[data-sum="attachments"]', String(attachmentCount(positions)));
-    for (const el of document.querySelectorAll('[data-cat-total]')) {
-      el.textContent = totalsText(L.totals(positions.filter((p) => p.category === el.dataset.catTotal)));
-    }
-    for (const el of document.querySelectorAll('[data-pos-total]')) {
-      const p = positions.find((x) => x.id === el.dataset.posTotal);
-      if (p) el.textContent = L.formatEuro(L.positionTotal(p));
-    }
+    if (!host || !entity) return renderMain();
+    host.replaceChildren(positionListContent(positionsFor(entity.id, state.year)));
   }
 
-  function amountInput(getValue, setValue, attrs) {
+  function filterBar(positions) {
+    const f = ui.filters;
+    const categories = Array.from(new Set(positions.map((p) => p.category))).sort((a, b) => a.localeCompare(b, 'de'));
+    if (f.category && !categories.includes(f.category)) f.category = '';
+    const direction = h('div', { class: 'segmented', role: 'group', 'aria-label': 'Ausgaben oder Einnahmen' },
+      [['all', 'Alle'], ['expense', 'Ausgaben'], ['income', 'Einnahmen']].map(([value, label]) => h('button', {
+        type: 'button',
+        class: f.direction === value ? 'active' : '',
+        'aria-pressed': f.direction === value ? 'true' : 'false',
+        onclick: (e) => {
+          f.direction = value;
+          for (const b of e.currentTarget.parentNode.children) {
+            const active = b === e.currentTarget;
+            b.classList.toggle('active', active);
+            b.setAttribute('aria-pressed', active ? 'true' : 'false');
+          }
+          renderPositionList();
+        },
+      }, label)));
+    const month = h('select', {
+      class: 'input', 'aria-label': 'Monat',
+      onchange: (e) => { f.month = e.target.value === '' ? null : Number(e.target.value); renderPositionList(); },
+    }, h('option', { value: '' }, 'Alle Monate'), L.MONTHS_LONG.map((m, i) => h('option', { value: String(i) }, m)));
+    month.value = f.month === null ? '' : String(f.month);
+    const category = h('select', {
+      class: 'input', 'aria-label': 'Kategorie',
+      onchange: (e) => { f.category = e.target.value; renderPositionList(); },
+    }, h('option', { value: '' }, 'Alle Kategorien'), categories.map((c) => h('option', { value: c }, c)));
+    category.value = f.category;
+    const search = h('input', {
+      class: 'input', type: 'search', placeholder: 'Suchen …', 'aria-label': 'Suchen', value: f.query,
+      oninput: (e) => { f.query = e.target.value; renderPositionList(); },
+    });
+    return h('div', { class: 'filters' }, direction, h('div', { class: 'filter-selects' }, month, category), search);
+  }
+
+  function positionListContent(positions) {
+    const f = ui.filters;
+    const filtered = L.sortByDate(L.filterPositions(positions, f));
+    const t = L.totalsFor(filtered, f.month);
+    const active = f.direction !== 'all' || f.month !== null || f.category || f.query.trim();
+    const summary = h('div', { class: 'list-summary' },
+      h('span', null,
+        (active ? filtered.length + ' von ' + positions.length : String(positions.length)) + ' Position(en)' +
+        (f.month !== null ? ' im ' + L.MONTHS_LONG[f.month] : '')),
+      h('span', { class: 'list-sum' },
+        t.expense || !t.income ? L.formatEuro(t.expense) : null,
+        t.income ? h('span', { class: 'income-text' }, (t.expense ? ' · ' : '') + '+' + L.formatEuro(t.income)) : null),
+      active ? h('button', {
+        type: 'button', class: 'link-btn',
+        onclick: () => { ui.filters = emptyFilters(); renderMain(); },
+      }, 'Filter zurücksetzen') : null);
+    return h('div', null,
+      summary,
+      filtered.length
+        ? h('ul', { class: 'pos-list' }, filtered.map(positionRow))
+        : h('p', { class: 'muted list-empty' }, 'Keine Position passt zu diesem Filter.'));
+  }
+
+  function formatDay(iso) {
+    return iso.slice(8, 10) + '.' + iso.slice(5, 7) + '.';
+  }
+
+  function dateBadge(p) {
+    if (p.kind === 'once') {
+      return h('span', { class: 'pos-date' }, h('strong', null, p.onceDate ? formatDay(p.onceDate) : '–'), h('small', null, 'einmalig'));
+    }
+    const filled = L.filledMonths(p);
+    const range = !filled.length ? '–' : filled.length === 1 ? L.MONTHS[filled[0]]
+      : L.MONTHS[filled[0]] + '–' + L.MONTHS[filled[filled.length - 1]];
+    return h('span', { class: 'pos-date' }, h('strong', null, range), h('small', null, 'monatlich'));
+  }
+
+  function positionRow(p) {
+    const open = ui.openId === p.id;
+    const editing = open && ui.draft && !ui.draft.isNew && ui.draft.p.id === p.id;
+    const month = ui.filters.month;
+    const amount = month === null ? L.positionTotal(p) : L.amountInMonth(p, month);
+    const income = p.direction === 'income';
+    const meta = [p.category];
+    if (p.reference) meta.push(p.reference);
+    if (p.attachmentIds.length) meta.push('📎 ' + p.attachmentIds.length);
+    return h('li', { class: 'pos-item' + (open ? ' open' : '') + (income ? ' income' : ''), dataset: { id: p.id } },
+      h('button', { type: 'button', class: 'pos-row', 'aria-expanded': open ? 'true' : 'false', onclick: () => toggleRow(p) },
+        dateBadge(p),
+        h('span', { class: 'pos-main' },
+          h('span', { class: 'pos-title' }, p.title || 'Ohne Bezeichnung'),
+          h('span', { class: 'pos-meta' }, meta.join(' · '))),
+        h('span', { class: 'pos-amount' },
+          h('span', null, (income ? '+' : '') + L.formatEuro(amount)),
+          month !== null ? h('small', null, 'Jahr ' + L.formatEuro(L.positionTotal(p))) : null),
+        h('span', { class: 'pos-chevron', 'aria-hidden': 'true' }, '›')),
+      open ? h('div', { class: 'pos-body' }, editing ? positionEditor(ui.draft) : positionDetail(p)) : null);
+  }
+
+  function positionDetail(p) {
+    const rows = [
+      ['Kategorie', p.category],
+      ['Art', p.direction === 'income' ? 'Einnahme' : 'Ausgabe'],
+      ['Zahlung', p.kind === 'once'
+        ? 'Einmalig' + (p.onceDate ? ' am ' + formatDay(p.onceDate) + p.onceDate.slice(0, 4) : '')
+        : 'Monatlich'],
+      ['Jahressumme', L.formatEuro(L.positionTotal(p))],
+    ];
+    if (p.reference) rows.push(['Kennung', p.reference]);
+    if (p.note) rows.push(['Notiz', p.note]);
+    const list = h('div', { class: 'attachment-list' });
+    renderAttachmentChips(list, p.attachmentIds, [], null);
+    return h('div', { class: 'pos-detail' },
+      h('dl', { class: 'detail-grid' }, rows.map(([k, v]) => [h('dt', null, k), h('dd', null, v)])),
+      p.kind === 'monthly' ? h('div', { class: 'months-read' }, L.MONTHS.map((m, i) => h('div', { class: 'month-read' },
+        h('span', null, m),
+        h('strong', { class: p.months[i] === null ? 'muted' : '' }, p.months[i] === null ? '–' : L.formatAmount(p.months[i]))))) : null,
+      p.attachmentIds.length ? list : h('p', { class: 'muted' }, 'Keine Belege angehängt.'),
+      h('div', { class: 'detail-actions' },
+        button('Bearbeiten', () => startEdit(p), 'primary'),
+        button('Löschen', () => deletePosition(p), 'ghost-danger')));
+  }
+
+  function amountInput(getValue, setValue, attrs, onValidity) {
     const input = h('input', Object.assign({
       class: 'amount',
       inputmode: 'decimal',
@@ -810,8 +995,10 @@
     }, attrs || {}));
     input.addEventListener('input', () => {
       const v = L.parseAmount(input.value);
-      input.classList.toggle('invalid', Number.isNaN(v));
-      if (!Number.isNaN(v)) setValue(v);
+      const valid = !Number.isNaN(v);
+      input.classList.toggle('invalid', !valid);
+      if (onValidity) onValidity(valid);
+      if (valid) setValue(v);
     });
     input.addEventListener('change', () => {
       const v = L.parseAmount(input.value);
@@ -820,64 +1007,105 @@
     return input;
   }
 
-  function positionCard(p) {
-    const rerender = () => card.replaceWith(positionCard(p));
-    const onAmountChange = () => { queueSave(p); updateTotals(); };
-
-    const card = h('article', { class: 'card position ' + p.direction, dataset: { id: p.id } },
-      h('div', { class: 'card-head' },
-        h('input', {
-          class: 'title-input',
-          value: p.title,
-          placeholder: 'Bezeichnung, z.B. Kfz-Versicherung',
-          'aria-label': 'Bezeichnung',
-          oninput: (e) => { p.title = e.target.value; queueSave(p); },
-        }),
-        h('span', { class: 'pos-total', dataset: { posTotal: p.id } }, L.formatEuro(L.positionTotal(p))),
-        h('button', { type: 'button', class: 'icon-btn danger', title: 'Position löschen', onclick: () => deletePosition(p) }, '🗑')),
-      h('div', { class: 'card-meta' },
-        h('label', { class: 'field' }, h('span', null, 'Kategorie'),
-          h('input', {
-            class: 'input',
-            list: 'category-list',
-            value: p.category,
-            onchange: async (e) => {
-              p.category = e.target.value.trim() || 'Sonstiges';
-              await ensureCategory(p.category);
-              await savePosition(p);
-              renderMain();
-            },
-          })),
-        h('label', { class: 'field' }, h('span', null, 'Kennung (IBAN, Kennzeichen, Vertragsnr. …)'),
-          h('input', { class: 'input', value: p.reference, oninput: (e) => { p.reference = e.target.value; queueSave(p); } })),
-        h('div', { class: 'field' }, h('span', null, 'Zahlung'),
-          segmented([['monthly', 'Monatlich'], ['once', 'Einmalig']], p.kind,
-            async (v) => { p.kind = v; await savePosition(p); rerender(); updateTotals(); }, 'Zahlungsart')),
-        h('div', { class: 'field' }, h('span', null, 'Art'),
-          segmented([['expense', 'Ausgabe'], ['income', 'Einnahme']], p.direction,
-            async (v) => { p.direction = v; await savePosition(p); rerender(); updateTotals(); }, 'Ausgabe oder Einnahme'))),
-      p.kind === 'monthly' ? monthGrid(p, onAmountChange) : onceRow(p, onAmountChange),
-      h('label', { class: 'field note' }, h('span', null, 'Notiz'),
-        h('textarea', { class: 'input', rows: '1', placeholder: 'Optional', oninput: (e) => { p.note = e.target.value; queueSave(p); } }, p.note)),
-      attachmentSection(p));
-
-    card.addEventListener('dragover', (e) => {
-      if (!e.dataTransfer.types.includes('Files')) return;
-      e.preventDefault();
-      card.classList.add('dragging');
-    });
-    card.addEventListener('dragleave', (e) => {
-      if (!card.contains(e.relatedTarget)) card.classList.remove('dragging');
-    });
-    card.addEventListener('drop', (e) => {
-      e.preventDefault();
-      card.classList.remove('dragging');
-      if (e.dataTransfer.files.length) addFiles(p, e.dataTransfer.files, card.querySelector('.attachment-list'));
-    });
-    return card;
+  /** Auswahlknöpfe, die nur ihren eigenen Zustand umschalten (kein Neuaufbau). */
+  function choice(options, current, onChange, label) {
+    const group = h('div', { class: 'segmented', role: 'group', 'aria-label': label });
+    for (const [value, text] of options) {
+      group.append(h('button', {
+        type: 'button',
+        class: value === current ? 'active' : '',
+        'aria-pressed': value === current ? 'true' : 'false',
+        onclick: (e) => {
+          for (const b of group.children) {
+            const active = b === e.currentTarget;
+            b.classList.toggle('active', active);
+            b.setAttribute('aria-pressed', active ? 'true' : 'false');
+          }
+          onChange(value);
+        },
+      }, text));
+    }
+    return group;
   }
 
-  function monthGrid(p, onChange) {
+  function positionEditor(d) {
+    const p = d.p;
+    const dirty = () => { ui.dirty = true; };
+    const validity = (key) => (valid) => {
+      if (valid) d.invalid.delete(key);
+      else d.invalid.add(key);
+      dirty();
+    };
+
+    const monthsBlock = editorMonths(d, dirty, validity);
+    const onceBlock = h('div', { class: 'once-row' },
+      h('label', { class: 'field' }, h('span', null, 'Datum'),
+        h('input', {
+          class: 'input', type: 'date', value: p.onceDate,
+          onchange: (e) => { p.onceDate = e.target.value; dirty(); },
+        })),
+      h('label', { class: 'field' }, h('span', null, 'Betrag (€)'),
+        amountInput(() => p.onceAmount, (v) => { p.onceAmount = v; dirty(); }, { 'aria-label': 'Betrag' }, validity('once'))));
+    monthsBlock.hidden = p.kind !== 'monthly';
+    onceBlock.hidden = p.kind !== 'once';
+
+    const attachments = editorAttachments(d);
+    const editor = h('div', { class: 'editor' },
+      h('label', { class: 'field' }, h('span', null, 'Bezeichnung'),
+        h('input', {
+          class: 'input editor-title', value: p.title, placeholder: 'z.B. Kfz-Versicherung', autocomplete: 'off',
+          oninput: (e) => { p.title = e.target.value; dirty(); },
+        })),
+      h('div', { class: 'editor-grid' },
+        h('label', { class: 'field' }, h('span', null, 'Kategorie'),
+          h('input', {
+            class: 'input', list: 'category-list', value: p.category, placeholder: 'z.B. Kfz', autocomplete: 'off',
+            oninput: (e) => { p.category = e.target.value; dirty(); },
+          })),
+        h('label', { class: 'field' }, h('span', null, 'Kennung (IBAN, Kennzeichen, Vertragsnr. …)'),
+          h('input', {
+            class: 'input', value: p.reference, autocomplete: 'off',
+            oninput: (e) => { p.reference = e.target.value; dirty(); },
+          }))),
+      h('div', { class: 'editor-grid' },
+        h('div', { class: 'field' }, h('span', null, 'Art'),
+          choice([['expense', 'Ausgabe'], ['income', 'Einnahme']], p.direction, (v) => { p.direction = v; dirty(); }, 'Ausgabe oder Einnahme')),
+        h('div', { class: 'field' }, h('span', null, 'Zahlung'),
+          choice([['monthly', 'Monatlich'], ['once', 'Einmalig']], p.kind, (v) => {
+            p.kind = v;
+            monthsBlock.hidden = v !== 'monthly';
+            onceBlock.hidden = v !== 'once';
+            dirty();
+          }, 'Zahlungsart'))),
+      monthsBlock,
+      onceBlock,
+      h('label', { class: 'field' }, h('span', null, 'Notiz'),
+        h('textarea', { class: 'input', rows: '2', placeholder: 'Optional', oninput: (e) => { p.note = e.target.value; dirty(); } }, p.note)),
+      attachments,
+      h('div', { class: 'editor-actions' },
+        button(d.isNew ? 'Übernehmen' : 'Speichern', saveDraft, 'primary'),
+        button('Abbrechen', cancelEdit),
+        d.isNew ? null : h('span', { class: 'spacer' }),
+        d.isNew ? null : button('Löschen', () => deletePosition(state.positions.find((x) => x.id === p.id)), 'ghost-danger')));
+
+    editor.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer.types.includes('Files')) return;
+      e.preventDefault();
+      editor.classList.add('dragging');
+    });
+    editor.addEventListener('dragleave', (e) => {
+      if (!editor.contains(e.relatedTarget)) editor.classList.remove('dragging');
+    });
+    editor.addEventListener('drop', (e) => {
+      e.preventDefault();
+      editor.classList.remove('dragging');
+      if (e.dataTransfer.files.length) addFilesToDraft(d, Array.from(e.dataTransfer.files), attachments.refresh);
+    });
+    return editor;
+  }
+
+  function editorMonths(d, dirty, validity) {
+    const p = d.p;
     const inputs = [];
 
     async function fill(i) {
@@ -899,15 +1127,15 @@
       p.months = next;
       inputs.forEach((input, j) => {
         input.value = L.formatAmount(p.months[j]);
-        input.classList.remove('invalid');
         if (j > i) {
+          input.classList.remove('invalid');
+          d.invalid.delete('m' + j);
           input.classList.remove('flash');
           void input.offsetWidth;
           input.classList.add('flash');
         }
       });
-      await savePosition(p);
-      updateTotals();
+      dirty();
     }
 
     async function clearAll() {
@@ -915,13 +1143,13 @@
       const ok = await confirmDialog('Alle Monate leeren?', 'Alle 12 Monatsbeträge dieser Position werden entfernt.', 'Leeren', true);
       if (!ok) return;
       p.months = L.emptyMonths();
-      inputs.forEach((input) => { input.value = ''; });
-      await savePosition(p);
-      updateTotals();
+      inputs.forEach((input, j) => { input.value = ''; input.classList.remove('invalid'); d.invalid.delete('m' + j); });
+      dirty();
     }
 
     const grid = h('div', { class: 'months' }, L.MONTHS.map((m, i) => {
-      const input = amountInput(() => p.months[i], (v) => { p.months[i] = v; onChange(); }, { 'aria-label': L.MONTHS_LONG[i] });
+      const input = amountInput(() => p.months[i], (v) => { p.months[i] = v; dirty(); },
+        { 'aria-label': L.MONTHS_LONG[i] }, validity('m' + i));
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
           e.preventDefault();
@@ -949,41 +1177,37 @@
         button('Monate leeren', clearAll, 'link')));
   }
 
-  function onceRow(p, onChange) {
-    return h('div', { class: 'once-row' },
-      h('label', { class: 'field' }, h('span', null, 'Datum'),
-        h('input', {
-          class: 'input',
-          type: 'date',
-          value: p.onceDate,
-          min: state.year + '-01-01',
-          max: state.year + '-12-31',
-          onchange: (e) => { p.onceDate = e.target.value; queueSave(p); },
-        })),
-      h('label', { class: 'field' }, h('span', null, 'Betrag (€)'),
-        amountInput(() => p.onceAmount, (v) => { p.onceAmount = v; onChange(); })));
-  }
-
-  function attachmentSection(p) {
+  function editorAttachments(d) {
     const list = h('div', { class: 'attachment-list' });
+    const refresh = () => renderAttachmentChips(list,
+      d.p.attachmentIds.filter((id) => !d.removed.includes(id)), d.pending,
+      (item) => {
+        if (item.pending) d.pending = d.pending.filter((f) => f.id !== item.id);
+        else d.removed.push(item.id);
+        ui.dirty = true;
+        refresh();
+      });
     const fileInput = h('input', {
       type: 'file',
       multiple: true,
-      accept: 'image/*,application/pdf',
+      accept: 'image/*,application/pdf,.pdf,.heic,.heif',
       hidden: true,
       onchange: (e) => {
         const files = Array.from(e.target.files);
         e.target.value = '';
-        addFiles(p, files, list);
+        addFilesToDraft(d, files, refresh);
       },
     });
-    renderAttachments(p, list);
-    return h('div', { class: 'attachments' },
+    refresh();
+    const section = h('div', { class: 'attachments' },
+      h('span', { class: 'field-label' }, 'Belege'),
       list,
       h('div', { class: 'attach-actions' },
         fileInput,
         button('📎 Beleg anhängen (Bild/PDF)', () => fileInput.click(), 'small'),
-        h('span', { class: 'muted drop-hint' }, 'oder Datei auf die Karte ziehen')));
+        h('span', { class: 'muted drop-hint' }, 'oder Datei hierher ziehen')));
+    section.refresh = refresh;
+    return section;
   }
 
   function openAttachment(att, url) {
@@ -1001,37 +1225,60 @@
     }
   }
 
-  async function renderAttachments(p, list) {
-    const atts = (await Promise.all(p.attachmentIds.map((id) => DB.get('attachments', id)))).filter(Boolean);
-    list.replaceChildren(...atts.map((a) => {
+  /**
+   * Beleg-Chips zeichnen: gespeicherte (ids) und noch nicht übernommene (pending).
+   * onRemove: null = nur ansehen, sonst Callback mit { id, pending }.
+   */
+  async function renderAttachmentChips(list, ids, pending, onRemove) {
+    const stored = (await Promise.all(ids.map((id) => DB.get('attachments', id)))).filter(Boolean);
+    const items = stored.map((a) => ({ att: a, pending: false })).concat(pending.map((a) => ({ att: a, pending: true })));
+    list.replaceChildren(...items.map(({ att: a, pending: isPending }) => {
       const url = URL.createObjectURL(a.blob);
       objectUrls.push(url);
       const isImage = a.type.startsWith('image/');
-      return h('div', { class: 'chip' },
+      return h('div', { class: 'chip' + (isPending ? ' chip-new' : '') },
         h('button', { type: 'button', class: 'chip-main', title: a.name + ' öffnen', onclick: () => openAttachment(a, url) },
           isImage ? h('img', { src: url, alt: '' }) : h('span', { class: 'file-icon' }, 'PDF'),
           h('span', { class: 'chip-text' },
             h('span', { class: 'chip-name' }, a.name),
-            h('span', { class: 'chip-size' }, formatSize(a.size)))),
+            h('span', { class: 'chip-size' }, isPending ? 'neu · ' + formatSize(a.size) : formatSize(a.size)))),
         h('button', { type: 'button', class: 'chip-btn', title: 'Herunterladen', onclick: () => download(a.name, a.blob) }, '⤓'),
-        h('button', { type: 'button', class: 'chip-btn danger', title: 'Beleg entfernen', onclick: () => removeAttachment(p, a, list) }, '✕'));
+        onRemove ? h('button', {
+          type: 'button', class: 'chip-btn danger', title: 'Beleg entfernen',
+          onclick: () => onRemove({ id: a.id, pending: isPending }),
+        }, '✕') : null);
     }));
+  }
+
+  /** Liste der Unternehmen einer Person mit ihren Jahressummen. */
+  function ownedCompanies(person, open) {
+    const companies = state.entities.filter((e) => e.type === 'company' && e.ownerId === person.id);
+    return h('section', { class: 'card owned' },
+      h('div', { class: 'owned-head' },
+        h('h3', null, 'Unternehmen von ' + person.name),
+        button('+ Unternehmen', () => addEntity('company', person.id), 'small')),
+      companies.length
+        ? h('div', { class: 'owned-list' }, companies.map((c) => {
+          const ps = positionsFor(c.id, state.year);
+          const t = L.totals(ps);
+          return h('button', { type: 'button', class: 'owned-item', onclick: () => open(c.id) },
+            h('span', { class: 'owned-name' }, c.name),
+            h('span', { class: 'muted' }, ps.length + ' Position(en)'),
+            h('span', { class: 'owned-sum' }, L.formatEuro(t.expense),
+              t.income ? h('span', { class: 'income-text' }, ' · +' + L.formatEuro(t.income)) : null),
+            h('span', { class: 'owned-arrow', 'aria-hidden': 'true' }, '›'));
+        }))
+        : h('p', { class: 'muted' }, 'Noch keine Unternehmen zugeordnet. Bestehende Unternehmen ordnest du über „Bearbeiten“ beim Unternehmen zu.'));
   }
 
   function overviewView() {
     const yearPositions = state.positions.filter((p) => p.year === state.year);
     const t = L.totals(yearPositions);
-    const open = (entityId, positionId) => {
-      state.view = { type: 'entity', id: entityId };
-      render();
-      if (positionId) {
-        const card = document.querySelector('[data-id="' + positionId + '"]');
-        if (card) {
-          card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          card.classList.add('highlight');
-          setTimeout(() => card.classList.remove('highlight'), 1600);
-        }
-      }
+    const open = async (entityId, positionId) => {
+      if (!(await go({ type: 'entity', id: entityId })) || !positionId) return;
+      ui.openId = positionId;
+      renderPositionList();
+      scrollToPosition(positionId, true);
     };
 
     if (!state.entities.length) {
@@ -1125,9 +1372,6 @@
       const file = e.target.files[0];
       e.target.value = '';
       if (file) importBackup(file);
-    });
-    window.addEventListener('pagehide', () => {
-      for (const p of state.positions) if (saveTimers.has(p.id)) savePosition(p);
     });
   }
 
