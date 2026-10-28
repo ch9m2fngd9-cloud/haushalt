@@ -612,7 +612,12 @@
         onclick: () => go({ type: 'overview' }),
       }, 'Jahresübersicht ' + state.year),
       group('person', 'Personen'),
-      group('company', 'Unternehmen'));
+      group('company', 'Unternehmen'),
+      h('button', {
+        type: 'button',
+        class: 'nav-item nav-settings' + (state.view.type === 'settings' ? ' active' : ''),
+        onclick: () => go({ type: 'settings' }),
+      }, '⚙︎ Einstellungen'));
     updateSidebarSums();
   }
 
@@ -628,7 +633,7 @@
     objectUrls = [];
     const entity = state.view.type === 'entity' ? entityById(state.view.id) : null;
     const main = document.getElementById('main');
-    main.replaceChildren(entity ? entityView(entity) : overviewView());
+    main.replaceChildren(entity ? entityView(entity) : state.view.type === 'settings' ? settingsView() : overviewView());
   }
 
   // ---------------------------------------------------------------------------
@@ -746,6 +751,8 @@
     }
     p.category = (p.category || '').trim() || 'Sonstiges';
     p.reference = (p.reference || '').trim();
+    const before = state.positions.find((x) => x.id === p.id);
+    const moved = d.isNew ? p.entityId !== state.view.id : before && before.entityId !== p.entityId;
 
     for (const file of d.pending) {
       await DB.put('attachments', {
@@ -769,7 +776,8 @@
     ui.openId = null;
     renderSidebar();
     renderMain();
-    scrollToPosition(p.id, true);
+    if (moved) toast('„' + p.title + '“ liegt jetzt bei ' + entityById(p.entityId).name + '.');
+    else scrollToPosition(p.id, true);
   }
 
   async function deletePosition(p) {
@@ -982,6 +990,8 @@
       p.attachmentIds.length ? list : h('p', { class: 'muted' }, 'Keine Belege angehängt.'),
       h('div', { class: 'detail-actions' },
         button('Bearbeiten', () => startEdit(p), 'primary'),
+        button('Verschieben …', () => movePosition(p), 'ghost'),
+        h('span', { class: 'spacer' }),
         button('Löschen', () => deletePosition(p), 'ghost-danger')));
   }
 
@@ -1057,16 +1067,14 @@
           oninput: (e) => { p.title = e.target.value; dirty(); },
         })),
       h('div', { class: 'editor-grid' },
-        h('label', { class: 'field' }, h('span', null, 'Kategorie'),
-          h('input', {
-            class: 'input', list: 'category-list', value: p.category, placeholder: 'z.B. Kfz', autocomplete: 'off',
-            oninput: (e) => { p.category = e.target.value; dirty(); },
-          })),
-        h('label', { class: 'field' }, h('span', null, 'Kennung (IBAN, Kennzeichen, Vertragsnr. …)'),
-          h('input', {
-            class: 'input', value: p.reference, autocomplete: 'off',
-            oninput: (e) => { p.reference = e.target.value; dirty(); },
-          }))),
+        h('label', { class: 'field' }, h('span', null, 'Kategorie'), categorySelect(p, dirty)),
+        h('label', { class: 'field' }, h('span', null, 'Gehört zu'),
+          entitySelect(p.entityId, (id) => { p.entityId = id; dirty(); }))),
+      h('label', { class: 'field' }, h('span', null, 'Kennung (IBAN, Kennzeichen, Vertragsnr. …)'),
+        h('input', {
+          class: 'input', value: p.reference, autocomplete: 'off',
+          oninput: (e) => { p.reference = e.target.value; dirty(); },
+        })),
       h('div', { class: 'editor-grid' },
         h('div', { class: 'field' }, h('span', null, 'Art'),
           choice([['expense', 'Ausgabe'], ['income', 'Einnahme']], p.direction, (v) => { p.direction = v; dirty(); }, 'Ausgabe oder Einnahme')),
@@ -1248,6 +1256,195 @@
           onclick: () => onRemove({ id: a.id, pending: isPending }),
         }, '✕') : null);
     }));
+  }
+
+  const NEW_CATEGORY = '\u0000neu';
+
+  /** Kategorie-Auswahl mit „+ Neue Kategorie …“ (statt Freitext, damit das iPhone eine Liste zeigt). */
+  function categorySelect(p, dirty) {
+    const select = h('select', { class: 'input' });
+    const fill = () => {
+      const names = L.allCategories(state.categories, []);
+      if (p.category && !names.includes(p.category)) names.push(p.category);
+      select.replaceChildren(
+        h('option', { value: '' }, 'Kategorie wählen …'),
+        ...names.map((c) => h('option', { value: c }, c)),
+        h('option', { value: NEW_CATEGORY }, '+ Neue Kategorie …'));
+      select.value = p.category || '';
+    };
+    select.addEventListener('change', async () => {
+      if (select.value !== NEW_CATEGORY) {
+        p.category = select.value;
+        dirty();
+        return;
+      }
+      const name = await promptDialog('Neue Kategorie', 'Name', '', { placeholder: 'z.B. Handwerker' });
+      if (name) {
+        const existing = L.findCategory(state.categories, name);
+        p.category = existing || name;
+        if (!existing) await ensureCategory(name);
+        dirty();
+      }
+      fill();
+    });
+    fill();
+    return select;
+  }
+
+  function entityOptionLabel(e) {
+    if (e.type === 'person') return e.name + ' (Person)';
+    const owner = L.ownerOf(e, state.entities);
+    return e.name + ' (Unternehmen' + (owner ? ' von ' + owner.name : '') + ')';
+  }
+
+  function entitySelect(current, onChange) {
+    const select = h('select', { class: 'input' },
+      L.orderEntities(state.entities).map((e) => h('option', { value: e.id }, entityOptionLabel(e))));
+    select.value = current;
+    select.addEventListener('change', () => onChange(select.value));
+    return select;
+  }
+
+  async function movePosition(p) {
+    if (state.entities.length < 2) {
+      await alertDialog('Verschieben nicht möglich', 'Lege zuerst eine weitere Person oder ein Unternehmen an.');
+      return;
+    }
+    let target = p.entityId;
+    const select = entitySelect(p.entityId, (id) => { target = id; });
+    const ok = await openDialog({
+      title: 'Position verschieben',
+      content: h('div', { class: 'dialog-fields' },
+        h('p', null, 'Wohin soll „' + (p.title || 'Ohne Bezeichnung') + '“ verschoben werden? Belege kommen mit.'),
+        h('label', { class: 'field' }, h('span', null, 'Nach'), select)),
+      confirmText: 'Verschieben',
+    });
+    if (!ok || target === p.entityId) return;
+    p.entityId = target;
+    await savePosition(p);
+    ui.openId = null;
+    render();
+    toast('„' + p.title + '“ liegt jetzt bei ' + entityById(target).name + '.');
+  }
+
+  /** Kurzer Hinweis am unteren Rand, verschwindet von selbst. */
+  function toast(text) {
+    const old = document.querySelector('.toast');
+    if (old) old.remove();
+    const el = h('div', { class: 'toast', role: 'status' }, text);
+    document.body.append(el);
+    setTimeout(() => el.remove(), 3200);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Einstellungen: Kategorien zentral verwalten
+
+  async function saveCategories(list) {
+    state.categories = Array.from(new Set(list)).sort((a, b) => a.localeCompare(b, 'de'));
+    await DB.setMeta('categories', state.categories);
+    renderCategoryList();
+  }
+
+  /** Alle Positionen (alle Jahre) von einer Kategorie in eine andere umhängen. */
+  async function recategorize(from, to) {
+    const changed = state.positions.filter((p) => p.category === from);
+    for (const p of changed) p.category = to;
+    await DB.putMany('positions', changed);
+    return changed.length;
+  }
+
+  async function addCategory(name) {
+    name = name.trim();
+    if (!name) return false;
+    const existing = L.findCategory(L.allCategories(state.categories, state.positions), name);
+    if (existing) {
+      await alertDialog('Gibt es schon', 'Die Kategorie „' + existing + '“ ist bereits vorhanden.');
+      return false;
+    }
+    await saveCategories(state.categories.concat(name));
+    return true;
+  }
+
+  async function renameCategory(name) {
+    const next = await promptDialog('Kategorie umbenennen', 'Neuer Name', name);
+    if (!next || next === name) return;
+    const others = L.allCategories(state.categories, state.positions).filter((c) => c !== name);
+    const existing = L.findCategory(others, next);
+    if (existing) {
+      const ok = await confirmDialog('Kategorien zusammenführen?',
+        '„' + existing + '“ gibt es schon. Alle Positionen aus „' + name + '“ werden nach „' + existing + '“ verschoben.',
+        'Zusammenführen');
+      if (!ok) return;
+    }
+    const target = existing || next;
+    const count = await recategorize(name, target);
+    await saveCategories(state.categories.filter((c) => c !== name).concat(target));
+    renderMain();
+    toast(count ? count + ' Position(en) geändert.' : 'Kategorie umbenannt.');
+  }
+
+  async function deleteCategory(name) {
+    const count = L.categoryUsage(state.positions).get(name) || 0;
+    if (!count) {
+      const ok = await confirmDialog('Kategorie löschen?', '„' + name + '“ wird aus der Liste entfernt.', 'Löschen', true);
+      if (!ok) return;
+      await saveCategories(state.categories.filter((c) => c !== name));
+      renderMain();
+      return;
+    }
+    const others = L.allCategories(state.categories, state.positions).filter((c) => c !== name);
+    if (!others.includes('Sonstiges')) others.push('Sonstiges');
+    const select = h('select', { class: 'input' }, others.map((c) => h('option', { value: c }, c)));
+    select.value = 'Sonstiges';
+    const ok = await openDialog({
+      title: 'Kategorie löschen?',
+      content: h('div', { class: 'dialog-fields' },
+        h('p', null, '„' + name + '“ wird von ' + count + ' Position(en) verwendet (alle Jahre). Wohin sollen diese?'),
+        h('label', { class: 'field' }, h('span', null, 'Verschieben nach'), select)),
+      confirmText: 'Löschen und verschieben',
+      danger: true,
+    });
+    if (!ok) return;
+    await recategorize(name, select.value);
+    await saveCategories(state.categories.filter((c) => c !== name).concat(select.value));
+    renderMain();
+    toast(count + ' Position(en) nach „' + select.value + '“ verschoben.');
+  }
+
+  function settingsView() {
+    const usage = L.categoryUsage(state.positions);
+    const categories = L.allCategories(state.categories, state.positions);
+    const input = h('input', { class: 'input', placeholder: 'z.B. Handwerker', autocomplete: 'off', 'aria-label': 'Neue Kategorie' });
+    const add = async () => {
+      if (await addCategory(input.value)) {
+        renderMain();
+        toast('Kategorie hinzugefügt.');
+      }
+    };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } });
+    const missingDefaults = L.DEFAULT_CATEGORIES.filter((c) => !L.findCategory(categories, c));
+    return h('div', { class: 'view' },
+      h('div', { class: 'view-head' },
+        h('div', null, h('span', { class: 'eyebrow' }, 'Gilt für alle Personen, Unternehmen und Jahre'), h('h2', null, 'Einstellungen'))),
+      h('section', { class: 'card settings-card' },
+        h('h3', null, 'Kategorien'),
+        h('p', { class: 'muted' }, 'Diese Kategorien stehen beim Anlegen einer Position zur Auswahl. ' +
+          'Umbenennen ändert alle Positionen mit dieser Kategorie.'),
+        h('div', { class: 'add-row' }, input, button('Hinzufügen', add, 'primary')),
+        h('ul', { class: 'cat-list' }, categories.map((c) => {
+          const n = usage.get(c) || 0;
+          return h('li', null,
+            h('span', { class: 'cat-name' }, c),
+            h('span', { class: 'cat-usage' }, n ? n + ' Position' + (n === 1 ? '' : 'en') : 'nicht verwendet'),
+            h('span', { class: 'cat-actions' },
+              button('Umbenennen', () => renameCategory(c), 'small'),
+              button('Löschen', () => deleteCategory(c), 'ghost-danger')));
+        })),
+        missingDefaults.length ? h('p', { class: 'muted' },
+          h('button', {
+            type: 'button', class: 'link-btn',
+            onclick: async () => { await saveCategories(state.categories.concat(missingDefaults)); renderMain(); },
+          }, 'Standardkategorien ergänzen'), ' (' + missingDefaults.join(', ') + ')') : null));
   }
 
   /** Liste der Unternehmen einer Person mit ihren Jahressummen. */

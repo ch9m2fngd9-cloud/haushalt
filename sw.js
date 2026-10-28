@@ -4,7 +4,7 @@
  * (die liegen in IndexedDB). Updates werden im Hintergrund geladen und beim
  * nächsten Öffnen aktiv.
  */
-const CACHE = 'steuer-belege-v4';
+const CACHE = 'steuer-belege-v5';
 const FILES = [
   './',
   'index.html',

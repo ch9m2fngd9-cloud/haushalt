@@ -226,6 +226,25 @@
     });
   }
 
+  /** Anzahl Positionen je Kategorie (über alle Jahre). */
+  function categoryUsage(positions) {
+    const usage = new Map();
+    for (const p of positions) usage.set(p.category, (usage.get(p.category) || 0) + 1);
+    return usage;
+  }
+
+  /** Alle Kategorien: die eingestellten plus die tatsächlich verwendeten, alphabetisch. */
+  function allCategories(configured, positions) {
+    const names = new Set(configured.concat(positions.map((p) => p.category)).filter(Boolean));
+    return Array.from(names).sort((a, b) => a.localeCompare(b, 'de'));
+  }
+
+  /** Vorhandene Kategorie gleichen Namens finden (ohne Groß-/Kleinschreibung). */
+  function findCategory(categories, name) {
+    const key = name.trim().toLowerCase();
+    return categories.find((c) => c.toLowerCase() === key) || null;
+  }
+
   /** Gruppiert Positionen nach Kategorie, Kategorien alphabetisch sortiert. */
   function groupByCategory(positions) {
     const map = new Map();
@@ -357,6 +376,9 @@
     positionTotal,
     totals,
     groupByCategory,
+    categoryUsage,
+    allCategories,
+    findCategory,
     filledMonths,
     positionDate,
     sortByDate,
