@@ -204,34 +204,69 @@
   // ---------------------------------------------------------------------------
   // Aktionen
 
-  async function addEntity(type) {
-    const label = type === 'company' ? 'Unternehmen' : 'Person';
-    const name = await promptDialog(label + ' hinzufügen', 'Name', '', {
+  /** Person, die gerade angezeigt wird (oder der das angezeigte Unternehmen gehört). */
+  function currentPersonId() {
+    const e = state.view.type === 'entity' ? entityById(state.view.id) : null;
+    if (!e) return null;
+    if (e.type === 'person') return e.id;
+    const owner = L.ownerOf(e, state.entities);
+    return owner ? owner.id : null;
+  }
+
+  /** Dialog für Name und (bei Unternehmen) Zuordnung zu einer Person. */
+  async function entityDialog(title, type, name, ownerId) {
+    const nameInput = h('input', {
+      class: 'input', value: name || '', required: true, autofocus: true,
       placeholder: type === 'company' ? 'z.B. Muster GmbH' : 'z.B. Max Mustermann',
     });
-    if (!name) return;
-    const entity = L.createEntity(type, name);
+    const persons = state.entities.filter((e) => e.type === 'person');
+    const ownerSelect = type === 'company' ? h('select', { class: 'input' },
+      h('option', { value: '' }, 'Keiner Person zugeordnet'),
+      persons.map((p) => h('option', { value: p.id }, p.name))) : null;
+    if (ownerSelect) ownerSelect.value = ownerId || '';
+    const ok = await openDialog({
+      title,
+      content: h('div', { class: 'dialog-fields' },
+        h('label', { class: 'field' }, h('span', null, 'Name'), nameInput),
+        ownerSelect && persons.length ? h('label', { class: 'field' }, h('span', null, 'Gehört zu'), ownerSelect) : null),
+      confirmText: 'Speichern',
+    });
+    if (!ok || !nameInput.value.trim()) return null;
+    return { name: nameInput.value.trim(), ownerId: ownerSelect ? ownerSelect.value || null : null };
+  }
+
+  async function addEntity(type, ownerId) {
+    const label = type === 'company' ? 'Unternehmen' : 'Person';
+    const preset = ownerId === undefined ? currentPersonId() : ownerId;
+    const result = await entityDialog(label + ' hinzufügen', type, '', preset);
+    if (!result) return;
+    const entity = L.createEntity(type, result.name, result.ownerId);
     await DB.put('entities', entity);
     state.entities.push(entity);
     state.view = { type: 'entity', id: entity.id };
     render();
   }
 
-  async function renameEntity(entity) {
-    const name = await promptDialog('Umbenennen', 'Name', entity.name);
-    if (!name) return;
-    entity.name = name;
+  async function editEntity(entity) {
+    const result = await entityDialog('Bearbeiten', entity.type, entity.name, entity.ownerId);
+    if (!result) return;
+    entity.name = result.name;
+    if (entity.type === 'company') entity.ownerId = result.ownerId;
     await DB.put('entities', entity);
     render();
   }
 
   async function deleteEntity(entity) {
     const positions = state.positions.filter((p) => p.entityId === entity.id);
+    const companies = state.entities.filter((e) => e.type === 'company' && e.ownerId === entity.id);
     const ok = await confirmDialog(
       '„' + entity.name + '“ löschen?',
-      'Dabei werden ' + positions.length + ' Position(en) aus allen Jahren samt Belegen endgültig gelöscht.',
+      'Dabei werden ' + positions.length + ' Position(en) aus allen Jahren samt Belegen endgültig gelöscht.' +
+      (companies.length ? ' Die zugeordneten Unternehmen bleiben erhalten, sind dann aber keiner Person mehr zugeordnet.' : ''),
       'Endgültig löschen', true);
     if (!ok) return;
+    for (const c of companies) c.ownerId = null;
+    await DB.putMany('entities', companies);
     await DB.removeMany('attachments', positions.flatMap((p) => p.attachmentIds));
     await DB.removeMany('positions', positions.map((p) => p.id));
     await DB.remove('entities', entity.id);
@@ -475,7 +510,7 @@
 
   function exportCsv() {
     const byId = Object.fromEntries(state.entities.map((e) => [e.id, e]));
-    const order = new Map(state.entities.map((e, i) => [e.id, i]));
+    const order = new Map(L.orderEntities(state.entities).map((e, i) => [e.id, i]));
     const positions = state.positions
       .filter((p) => p.year === state.year)
       .sort((a, b) => (order.get(a.entityId) - order.get(b.entityId)) ||
@@ -505,21 +540,27 @@
 
   function renderSidebar() {
     const nav = document.getElementById('sidebar');
-    const isActive = (v) => state.view.type === v.type && state.view.id === v.id;
-    const group = (type, title) => {
-      const entities = state.entities.filter((e) => e.type === type);
-      return h('section', { class: 'nav-group' },
-        h('div', { class: 'nav-group-head' },
-          h('h2', null, title),
-          h('button', { type: 'button', class: 'icon-btn', title: (type === 'company' ? 'Unternehmen' : 'Person') + ' hinzufügen', onclick: () => addEntity(type) }, '+')),
-        entities.length
-          ? entities.map((e) => h('button', {
-            type: 'button',
-            class: 'nav-item' + (isActive({ type: 'entity', id: e.id }) ? ' active' : ''),
-            onclick: () => { state.view = { type: 'entity', id: e.id }; render(); },
-          }, h('span', { class: 'nav-name' }, e.name), h('span', { class: 'nav-sum', dataset: { entitySum: e.id } })))
-          : h('p', { class: 'nav-empty' }, 'Noch keine Einträge'));
-    };
+    const isActive = (id) => state.view.type === 'entity' && state.view.id === id;
+    const item = (e, sub) => h('button', {
+      type: 'button',
+      class: 'nav-item' + (sub ? ' nav-sub' : '') + (isActive(e.id) ? ' active' : ''),
+      onclick: () => { state.view = { type: 'entity', id: e.id }; render(); },
+    }, h('span', { class: 'nav-name' }, e.name), h('span', { class: 'nav-sum', dataset: { entitySum: e.id } }));
+    const head = (title, type) => h('div', { class: 'nav-group-head' },
+      h('h2', null, title),
+      h('button', { type: 'button', class: 'icon-btn', title: (type === 'company' ? 'Unternehmen' : 'Person') + ' hinzufügen', onclick: () => addEntity(type) }, '+'));
+    const persons = state.entities.filter((e) => e.type === 'person');
+    const companies = state.entities.filter((e) => e.type === 'company');
+    const freeCompanies = companies.filter((c) => !L.ownerOf(c, state.entities));
+    const group = (type, title) => type === 'person'
+      ? h('section', { class: 'nav-group' }, head(title, type),
+        persons.length
+          ? persons.map((p) => [item(p), companies.filter((c) => c.ownerId === p.id).map((c) => item(c, true))])
+          : h('p', { class: 'nav-empty' }, 'Noch keine Einträge'))
+      : h('section', { class: 'nav-group' }, head(companies.length > freeCompanies.length ? 'Weitere Unternehmen' : title, type),
+        freeCompanies.length
+          ? freeCompanies.map((c) => item(c))
+          : h('p', { class: 'nav-empty' }, companies.length ? 'Alle Unternehmen sind einer Person zugeordnet' : 'Noch keine Einträge'));
     nav.replaceChildren(
       h('button', {
         type: 'button',
@@ -560,19 +601,24 @@
     const positions = positionsFor(entity.id, state.year);
     const t = L.totals(positions);
     const groups = L.groupByCategory(positions);
+    const owner = L.ownerOf(entity, state.entities);
+    const open = (id) => { state.view = { type: 'entity', id }; render(); window.scrollTo(0, 0); };
     return h('div', { class: 'view' },
       h('div', { class: 'view-head' },
         h('div', null,
-          h('span', { class: 'eyebrow' }, (entity.type === 'company' ? 'Unternehmen' : 'Person') + ' · ' + state.year),
+          h('span', { class: 'eyebrow' },
+            (entity.type === 'company' ? 'Unternehmen' : 'Person') + ' · ' + state.year,
+            owner ? [' · gehört zu ', h('button', { type: 'button', class: 'link-btn', onclick: () => open(owner.id) }, owner.name)] : null),
           h('h2', null, entity.name)),
         h('div', { class: 'actions' },
-          button('Umbenennen', () => renameEntity(entity), 'ghost'),
+          button('Bearbeiten', () => editEntity(entity), 'ghost'),
           button('Löschen', () => deleteEntity(entity), 'ghost-danger'))),
       h('div', { class: 'stats' },
         stat('Ausgaben', L.formatEuro(t.expense), 'expense'),
         stat('Einnahmen', L.formatEuro(t.income), 'income', 'income'),
         stat('Positionen', String(positions.length)),
         stat('Belege', String(attachmentCount(positions)), 'attachments')),
+      entity.type === 'person' ? ownedCompanies(entity, open) : null,
       h('div', { class: 'toolbar' },
         button('+ Position hinzufügen', () => addPosition(entity), 'primary'),
         button('Aus Vorjahr übernehmen', () => copyFromPreviousYear(entity))),
@@ -585,6 +631,27 @@
         : h('div', { class: 'empty' },
           h('p', null, 'Für ' + state.year + ' gibt es noch keine Positionen.'),
           h('p', { class: 'muted' }, 'Lege z.B. ein Bankkonto, eine Kfz-Versicherung oder die Kfz-Steuer an.')));
+  }
+
+  /** Liste der Unternehmen einer Person mit ihren Jahressummen. */
+  function ownedCompanies(person, open) {
+    const companies = state.entities.filter((e) => e.type === 'company' && e.ownerId === person.id);
+    return h('section', { class: 'card owned' },
+      h('div', { class: 'owned-head' },
+        h('h3', null, 'Unternehmen von ' + person.name),
+        button('+ Unternehmen', () => addEntity('company', person.id), 'small')),
+      companies.length
+        ? h('div', { class: 'owned-list' }, companies.map((c) => {
+          const ps = positionsFor(c.id, state.year);
+          const t = L.totals(ps);
+          return h('button', { type: 'button', class: 'owned-item', onclick: () => open(c.id) },
+            h('span', { class: 'owned-name' }, c.name),
+            h('span', { class: 'muted' }, ps.length + ' Position(en)'),
+            h('span', { class: 'owned-sum' }, L.formatEuro(t.expense),
+              t.income ? h('span', { class: 'income-text' }, ' · +' + L.formatEuro(t.income)) : null),
+            h('span', { class: 'owned-arrow', 'aria-hidden': 'true' }, '›'));
+        }))
+        : h('p', { class: 'muted' }, 'Noch keine Unternehmen zugeordnet. Bestehende Unternehmen ordnest du über „Bearbeiten“ beim Unternehmen zu.'));
   }
 
   function updateTotals() {
@@ -852,12 +919,13 @@
             button('+ Unternehmen anlegen', () => addEntity('company')))));
     }
 
-    const entityRows = state.entities.map((e) => {
+    const entityRows = L.orderEntities(state.entities).map((e) => {
+      const owner = L.ownerOf(e, state.entities);
       const ps = yearPositions.filter((p) => p.entityId === e.id);
       const et = L.totals(ps);
       return h('tr', { class: 'clickable', onclick: () => open(e.id) },
-        h('td', null, e.name),
-        h('td', null, e.type === 'company' ? 'Unternehmen' : 'Person'),
+        h('td', { class: owner ? 'sub-name' : null }, e.name),
+        h('td', null, e.type === 'company' ? 'Unternehmen' + (owner ? ' von ' + owner.name : '') : 'Person'),
         h('td', { class: 'num' }, String(ps.length)),
         h('td', { class: 'num' }, String(attachmentCount(ps))),
         h('td', { class: 'num' }, L.formatEuro(et.expense)),

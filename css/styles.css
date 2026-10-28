@@ -538,3 +538,57 @@ tbody tr:last-child td { border-bottom: 0; }
 .import-item { padding: 6px 0; }
 .import-status { display: block; font-size: 12px; color: var(--income); }
 .import-status.update { color: var(--accent); }
+
+/* ---------- Unternehmen einer Person ---------- */
+
+.nav-sub { padding-left: 26px; position: relative; font-size: 14px; }
+.nav-sub::before {
+  content: "";
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-left: 1.5px solid var(--border);
+  border-bottom: 1.5px solid var(--border);
+  transform: translateY(-75%);
+}
+
+.owned { display: flex; flex-direction: column; gap: 10px; }
+.owned-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.owned-head h3 { font-size: 16px; }
+.owned p { margin: 0; font-size: 13px; }
+.owned-list { display: flex; flex-direction: column; }
+
+.owned-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto 16px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 4px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.owned-item:hover { background: var(--surface-2); }
+.owned-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.owned-item .muted { font-size: 13px; }
+.owned-sum { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.owned-arrow { color: var(--muted); font-size: 18px; }
+
+td.sub-name { padding-left: 26px; }
+
+.dialog-fields { display: flex; flex-direction: column; gap: 12px; }
+
+@media (max-width: 760px) {
+  .owned-item { grid-template-columns: minmax(0, 1fr) auto 16px; }
+  .owned-item .muted { display: none; }
+}
+
+/* iPhone zoomt bei Eingabefeldern unter 16px automatisch hinein und bleibt vergrößert. */
+@media (pointer: coarse) {
+  input, select, textarea { font-size: 16px !important; }
+}

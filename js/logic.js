@@ -92,8 +92,31 @@
     }, fields || {});
   }
 
-  function createEntity(type, name) {
-    return { id: uid(), type: type, name: name, createdAt: new Date().toISOString() };
+  /** ownerId: bei Unternehmen optional die ID der Person, zu der es gehört. */
+  function createEntity(type, name, ownerId) {
+    return { id: uid(), type: type, name: name, ownerId: ownerId || null, createdAt: new Date().toISOString() };
+  }
+
+  /** Person, zu der ein Unternehmen gehört, oder null. */
+  function ownerOf(entity, entities) {
+    if (entity.type !== 'company' || !entity.ownerId) return null;
+    return entities.find((e) => e.id === entity.ownerId && e.type === 'person') || null;
+  }
+
+  /**
+   * Reihenfolge für Listen: jede Person, direkt gefolgt von ihren Unternehmen,
+   * danach die Unternehmen ohne Zuordnung.
+   */
+  function orderEntities(entities) {
+    const persons = entities.filter((e) => e.type === 'person');
+    const companies = entities.filter((e) => e.type === 'company');
+    const result = [];
+    for (const person of persons) {
+      result.push(person);
+      result.push(...companies.filter((c) => ownerOf(c, entities) === person));
+    }
+    result.push(...companies.filter((c) => !ownerOf(c, entities)));
+    return result;
   }
 
   /**
@@ -211,7 +234,7 @@
    * entitiesById: { [id]: entity }
    */
   function buildCsv(positions, entitiesById) {
-    const header = ['Jahr', 'Typ', 'Person/Unternehmen', 'Kategorie', 'Position', 'Kennung', 'Art',
+    const header = ['Jahr', 'Typ', 'Person/Unternehmen', 'Gehört zu', 'Kategorie', 'Position', 'Kennung', 'Art',
       'Zahlung', 'Datum (einmalig)'].concat(MONTHS_LONG, ['Jahressumme', 'Anzahl Belege', 'Notiz']);
     const rows = [header];
     for (const p of positions) {
@@ -221,6 +244,7 @@
         p.year,
         entity.type === 'company' ? 'Unternehmen' : 'Person',
         entity.name,
+        entity.ownerId && entitiesById[entity.ownerId] ? entitiesById[entity.ownerId].name : '',
         p.category,
         p.title,
         p.reference,
@@ -243,6 +267,8 @@
     emptyMonths,
     createPosition,
     createEntity,
+    ownerOf,
+    orderEntities,
     fillForward,
     positionTotal,
     totals,
