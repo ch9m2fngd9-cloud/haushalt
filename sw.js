@@ -4,7 +4,7 @@
  * (die liegen in IndexedDB). Updates werden im Hintergrund geladen und beim
  * nächsten Öffnen aktiv.
  */
-const CACHE = 'steuer-belege-v2';
+const CACHE = 'steuer-belege-v3';
 const FILES = [
   './',
   'index.html',
@@ -12,6 +12,8 @@ const FILES = [
   'js/logic.js',
   'js/db.js',
   'js/app.js',
+  'js/pdf.js',
+  'js/vendor/pdf-lib.min.js',
   'manifest.webmanifest',
   'icons/apple-touch-icon.png',
   'icons/icon-192.png',

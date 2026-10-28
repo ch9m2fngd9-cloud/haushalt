@@ -508,14 +508,141 @@
       ' Position(en) und ' + attachments.length + ' Beleg(en) wurden übernommen.');
   }
 
-  function exportCsv() {
+  /** Auswahlmöglichkeiten für den Umfang eines Exports. */
+  function scopeOptions() {
+    const options = [['all', 'Alle Personen & Unternehmen']];
+    for (const e of L.orderEntities(state.entities)) {
+      const hasCompanies = e.type === 'person' && state.entities.some((c) => c.type === 'company' && c.ownerId === e.id);
+      if (hasCompanies) options.push(['p:' + e.id, e.name + ' mit Unternehmen']);
+      options.push(['e:' + e.id, hasCompanies ? e.name + ' (nur Person)' : e.name]);
+    }
+    return options;
+  }
+
+  function scopeLabel(scope) {
+    const option = scopeOptions().find(([value]) => value === scope);
+    return option ? option[1] : '';
+  }
+
+  function exportFilename(scope, ext) {
+    const label = scope === 'all' ? '' : '-' + scopeLabel(scope).toLowerCase()
+      .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    return 'steuer-belege-' + state.year + label + '.' + ext;
+  }
+
+  async function exportDialog() {
+    if (!state.entities.length) {
+      await alertDialog('Nichts zu exportieren', 'Lege zuerst eine Person oder ein Unternehmen an.');
+      return;
+    }
+    const scopeSelect = h('select', { class: 'input' }, scopeOptions().map(([value, label]) => h('option', { value }, label)));
+    const current = state.view.type === 'entity' ? entityById(state.view.id) : null;
+    const hasCompanies = current && state.entities.some((c) => c.ownerId === current.id);
+    scopeSelect.value = !current ? 'all' : (hasCompanies ? 'p:' : 'e:') + current.id;
+    const pdf = h('input', { type: 'radio', name: 'export-format', value: 'pdf', checked: true });
+    const csv = h('input', { type: 'radio', name: 'export-format', value: 'csv' });
+    const receipts = h('input', { type: 'checkbox', checked: true });
+    const receiptsRow = h('label', { class: 'check' }, receipts, ' Belege (Fotos und PDFs) hinten anhängen');
+    const sync = () => { receiptsRow.hidden = !pdf.checked; };
+    pdf.addEventListener('change', sync);
+    csv.addEventListener('change', sync);
+
+    const ok = await openDialog({
+      title: 'Export ' + state.year,
+      content: h('div', { class: 'import-dialog' },
+        h('label', { class: 'field' }, h('span', null, 'Umfang'), scopeSelect),
+        h('label', { class: 'check' }, pdf, h('span', null, h('strong', null, 'PDF-Bericht'), h('br'),
+          h('span', { class: 'muted' }, 'Übersicht und alle Positionen, z.B. für den Steuerberater.'))),
+        h('label', { class: 'check' }, csv, h('span', null, h('strong', null, 'CSV-Tabelle'), h('br'),
+          h('span', { class: 'muted' }, 'Zum Weiterrechnen in Excel oder Numbers.'))),
+        receiptsRow),
+      confirmText: 'Exportieren',
+    });
+    if (!ok) return;
+    const scope = scopeSelect.value;
+    if (csv.checked) exportCsv(scope);
+    else await exportPdf(scope, receipts.checked);
+  }
+
+  function exportCsv(scope) {
+    const entities = L.entitiesInScope(state.entities, scope);
     const byId = Object.fromEntries(state.entities.map((e) => [e.id, e]));
-    const order = new Map(L.orderEntities(state.entities).map((e, i) => [e.id, i]));
+    const order = new Map(entities.map((e, i) => [e.id, i]));
     const positions = state.positions
-      .filter((p) => p.year === state.year)
+      .filter((p) => p.year === state.year && order.has(p.entityId))
       .sort((a, b) => (order.get(a.entityId) - order.get(b.entityId)) ||
-        a.category.localeCompare(b.category, 'de') || a.title.localeCompare(b.title, 'de'));
-    download('steuer-belege-' + state.year + '.csv', L.buildCsv(positions, byId), 'text/csv;charset=utf-8');
+        a.category.localeCompare(b.category, 'de') || a.title.localeCompare(b.title, 'de', { numeric: true }));
+    download(exportFilename(scope, 'csv'), L.buildCsv(positions, byId), 'text/csv;charset=utf-8');
+  }
+
+  let pdfLibPromise = null;
+
+  /** pdf-lib erst bei Bedarf laden (ca. 500 KB). In Claude vom CDN, sonst aus der App. */
+  function loadPdfLib() {
+    if (window.PDFLib) return Promise.resolve(window.PDFLib);
+    if (!pdfLibPromise) {
+      pdfLibPromise = new Promise((resolve, reject) => {
+        const script = h('script', {
+          src: inClaude ? 'https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js' : 'js/vendor/pdf-lib.min.js',
+        });
+        script.onload = () => resolve(window.PDFLib);
+        script.onerror = () => { pdfLibPromise = null; reject(new Error('PDF-Bibliothek konnte nicht geladen werden')); };
+        document.head.append(script);
+      });
+    }
+    return pdfLibPromise;
+  }
+
+  /** Bilder, die pdf-lib nicht direkt kann (z.B. HEIC, WebP), über ein Canvas in JPEG umwandeln. */
+  async function toJpeg(blob) {
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error('Bild konnte nicht gelesen werden'));
+        image.src = url;
+      });
+      const canvas = h('canvas', { width: String(img.naturalWidth), height: String(img.naturalHeight) });
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
+      const jpeg = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+      return new Uint8Array(await jpeg.arrayBuffer());
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function exportPdf(scope, includeReceipts) {
+    const busy = h('div', { class: 'busy', role: 'status' }, h('div', { class: 'busy-box' }, 'PDF wird erstellt …'));
+    document.body.append(busy);
+    let bytes;
+    try {
+      for (const p of state.positions) if (saveTimers.has(p.id)) await savePosition(p);
+      const PDFLib = await loadPdfLib();
+      bytes = await window.PdfReport.build({
+        PDFLib,
+        Logic: L,
+        year: state.year,
+        title: 'Steuer-Belege ' + state.year,
+        subtitle: scopeLabel(scope),
+        entities: L.entitiesInScope(state.entities, scope),
+        allEntities: state.entities,
+        positions: state.positions.filter((p) => p.year === state.year),
+        includeReceipts,
+        getAttachment: (id) => DB.get('attachments', id),
+        toJpeg,
+      });
+    } catch (e) {
+      busy.remove();
+      await alertDialog('PDF konnte nicht erstellt werden', (e && e.message) || 'Unbekannter Fehler');
+      return;
+    }
+    busy.remove();
+    await download(exportFilename(scope, 'pdf'), new Blob([bytes], { type: 'application/pdf' }));
   }
 
   // ---------------------------------------------------------------------------
@@ -990,7 +1117,7 @@
       const value = await promptDialog('Jahr hinzufügen', 'Jahr', String(suggestion), { type: 'number', min: '1990', max: '2100', step: '1' });
       if (value) setYear(Number(value));
     });
-    document.getElementById('export-csv').addEventListener('click', exportCsv);
+    document.getElementById('export').addEventListener('click', exportDialog);
     document.getElementById('export-backup').addEventListener('click', exportBackup);
     const importInput = document.getElementById('import-file');
     document.getElementById('import-backup').addEventListener('click', () => importInput.click());

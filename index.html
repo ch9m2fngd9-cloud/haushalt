@@ -24,7 +24,7 @@
       <button type="button" id="add-year" class="icon-btn" title="Jahr hinzufügen">+</button>
     </div>
     <div class="top-actions">
-      <button type="button" id="export-csv" class="btn btn-ghost" title="Alle Positionen des gewählten Jahres als CSV (Excel) exportieren">CSV-Export</button>
+      <button type="button" id="export" class="btn btn-ghost" title="Gewähltes Jahr als PDF-Bericht oder CSV-Tabelle exportieren">Export</button>
       <button type="button" id="export-backup" class="btn btn-ghost" title="Alle Daten inkl. Belege als Datei sichern">Backup speichern</button>
       <button type="button" id="import-backup" class="btn btn-ghost" title="Backup-Datei laden (ersetzt die aktuellen Daten)">Backup laden</button>
       <input type="file" id="import-file" accept="application/json,.json" hidden>
@@ -48,6 +48,7 @@
 
   <script src="js/logic.js"></script>
   <script src="js/db.js"></script>
+  <script src="js/pdf.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

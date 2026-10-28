@@ -97,6 +97,20 @@
     return { id: uid(), type: type, name: name, ownerId: ownerId || null, createdAt: new Date().toISOString() };
   }
 
+  /**
+   * Auswahl für Exporte: 'all' = alle, 'p:<id>' = Person samt ihren Unternehmen,
+   * 'e:<id>' = nur dieser eine Eintrag. Ergebnis in Listen-Reihenfolge.
+   */
+  function entitiesInScope(entities, scope) {
+    const ordered = orderEntities(entities);
+    if (!scope || scope === 'all') return ordered;
+    const id = scope.slice(2);
+    if (scope.startsWith('p:')) {
+      return ordered.filter((e) => e.id === id || (ownerOf(e, entities) || {}).id === id);
+    }
+    return ordered.filter((e) => e.id === id);
+  }
+
   /** Person, zu der ein Unternehmen gehört, oder null. */
   function ownerOf(entity, entities) {
     if (entity.type !== 'company' || !entity.ownerId) return null;
@@ -269,6 +283,7 @@
     createEntity,
     ownerOf,
     orderEntities,
+    entitiesInScope,
     fillForward,
     positionTotal,
     totals,
